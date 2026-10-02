@@ -1,0 +1,35 @@
+{
+  "name": "trackback",
+  "version": "0.1.0",
+  "private": true,
+  "description": "API-first rehearsal backing-track player",
+  "main": "./out/main/index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^5.0.0",
+    "cors": "^2.8.5",
+    "express": "^5.1.0",
+    "music-metadata": "^11.9.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.3",
+    "@types/node": "^24.5.2",
+    "@types/react": "^19.1.16",
+    "@types/react-dom": "^19.1.9",
+    "@types/ws": "^8.18.1",
+    "electron": "44.5.1",
+    "electron-vite": "5.0.0",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.7"
+  }
+}
