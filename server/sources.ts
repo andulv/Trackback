@@ -110,17 +110,22 @@ class SpotDlRepository implements SongSourceRepository {
   async materialize(ref: string, context: MaterializeContext): Promise<MaterializedAudio> {
     context.log('Resolving song with spotDL');
     const executable = process.env.TRACKBACK_SPOTDL ?? 'spotdl';
-    const outputTemplate = path.join(context.targetDir, '{track-id}.{output-ext}');
+    const outputTemplate = 'source.{output-ext}';
+    const expectedOutput = path.join(context.targetDir, 'source.flac');
     const args = [
       'download',
       ref,
       '--format', 'flac',
       '--output', outputTemplate,
+      '--overwrite', 'force',
       '--simple-tui'
     ];
 
     await new Promise<void>((resolve, reject) => {
-      const child = spawn(executable, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      const child = spawn(executable, args, {
+        cwd: context.targetDir,
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
       const consume = (chunk: Buffer) => {
         for (const line of chunk.toString().split(/\r?\n/).filter(Boolean)) context.log(line);
       };
@@ -135,11 +140,22 @@ class SpotDlRepository implements SongSourceRepository {
       });
     });
 
+    if (fs.existsSync(expectedOutput)) {
+      return { filePath: expectedOutput };
+    }
+
     const files = (await fs.promises.readdir(context.targetDir))
       .filter(name => audioExtensions.has(path.extname(name).toLowerCase()));
 
-    if (files.length === 0) throw new Error('spotDL completed without producing an audio file');
-    if (files.length > 1) throw new Error('The query resolved to multiple songs. Import one track at a time in this version.');
+    if (files.length === 0) {
+      const directoryContents = await fs.promises.readdir(context.targetDir);
+      throw new Error(
+        `spotDL reported success but produced no supported audio file in ${context.targetDir}. Files: ${directoryContents.join(', ') || '(none)'}`
+      );
+    }
+    if (files.length > 1) {
+      throw new Error('The query resolved to multiple songs. Import one track at a time in this version.');
+    }
 
     return { filePath: path.join(context.targetDir, files[0]) };
   }
