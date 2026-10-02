@@ -2,8 +2,11 @@ import React, { useEffect, useMemo, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import './styles.css';
 
-const API = location.port === '5173' ? 'http://127.0.0.1:4317' : location.origin;
-const WS = location.port === '5173' ? 'ws://127.0.0.1:4317/events' : `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/events`;
+const DEV_API = import.meta.env.VITE_TRACKBACK_API ?? 'http://127.0.0.1:4317';
+const API = import.meta.env.DEV ? DEV_API : location.origin;
+const WS = import.meta.env.DEV
+  ? `${DEV_API.replace(/^http/, 'ws')}/events`
+  : `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/events`;
 
 type StemId = 'original' | 'vocals' | 'drums' | 'bass' | 'guitar' | 'piano' | 'other';
 
