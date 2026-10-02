@@ -1,14 +1,13 @@
 {
   "name": "trackback",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "API-first rehearsal backing-track player",
-  "main": "./out/main/index.js",
   "type": "module",
   "scripts": {
-    "dev": "electron-vite dev",
-    "build": "electron-vite build",
-    "preview": "electron-vite preview",
+    "dev": "concurrently -k \"vite --host 127.0.0.1 --port 5173\" \"tsx watch server/index.ts\"",
+    "build": "vite build",
+    "start": "tsx server/index.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -27,8 +26,8 @@
     "@types/react": "^19.1.16",
     "@types/react-dom": "^19.1.9",
     "@types/ws": "^8.18.1",
-    "electron": "44.5.1",
-    "electron-vite": "5.0.0",
+    "concurrently": "^9.2.1",
+    "tsx": "^4.20.5",
     "typescript": "^5.9.2",
     "vite": "^7.1.7"
   }

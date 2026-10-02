@@ -2,7 +2,8 @@ import React, { useEffect, useMemo, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import './styles.css';
 
-const API = 'http://127.0.0.1:4317';
+const API = location.port === '5173' ? 'http://127.0.0.1:4317' : location.origin;
+const WS = location.port === '5173' ? 'ws://127.0.0.1:4317/events' : `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/events`;
 
 type StemId = 'original' | 'vocals' | 'drums' | 'bass' | 'guitar' | 'piano' | 'other';
 
@@ -14,9 +15,43 @@ interface StemState {
   solo: boolean;
 }
 
+interface LibrarySong {
+  id: string;
+  title: string;
+  artist: string | null;
+  album: string | null;
+  durationSeconds: number;
+  sourceRepositoryId: string;
+  status: 'imported' | 'separating' | 'ready' | 'error';
+  error: string | null;
+  stems: StemState[];
+}
+
+interface ImportJob {
+  id: string;
+  sourceRepositoryId: string;
+  sourceRef: string;
+  status: 'queued' | 'importing' | 'separating' | 'ready' | 'error';
+  message: string | null;
+  error: string | null;
+  songId: string | null;
+}
+
+interface SourceDescriptor {
+  id: string;
+  label: string;
+  description: string;
+  inputKind: 'file' | 'text';
+  placeholder?: string;
+}
+
 interface AppState {
+  library: {
+    songs: LibrarySong[];
+    jobs: ImportJob[];
+  };
   project: null | {
-    id: string;
+    songId: string;
     title: string;
     durationSeconds: number;
     stems: StemState[];
@@ -28,11 +63,6 @@ interface AppState {
     pitchSemitones: number;
     loopStartSeconds: number | null;
     loopEndSeconds: number | null;
-  };
-  separation: {
-    running: boolean;
-    error: string | null;
-    lastLogLine: string | null;
   };
 }
 
@@ -49,8 +79,24 @@ async function request<T>(route: string, init?: RequestInit): Promise<T> {
 
 const commands = {
   state: () => request<AppState>('/api/state'),
-  openDialog: () => request<AppState | undefined>('/api/dialog/open-audio', { method: 'POST' }),
-  separate: () => request<{ accepted: boolean }>('/api/separation/start', { method: 'POST' }),
+  sources: () => request<SourceDescriptor[]>('/api/sources'),
+  importRef: (sourceRepositoryId: string, sourceRef: string, autoSeparate: boolean) =>
+    request<ImportJob>('/api/import', {
+      method: 'POST',
+      body: JSON.stringify({ sourceRepositoryId, sourceRef, autoSeparate })
+    }),
+  upload: async (file: File, autoSeparate: boolean) => {
+    const response = await fetch(`${API}/api/import/upload?autoSeparate=${autoSeparate}`, {
+      method: 'POST',
+      headers: { 'X-Filename': encodeURIComponent(file.name) },
+      body: file
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error ?? `HTTP ${response.status}`);
+    return data as ImportJob;
+  },
+  openSong: (songId: string) => request<AppState>(`/api/library/${songId}/open`, { method: 'POST' }),
+  separateSong: (songId: string) => request<{ accepted: boolean }>(`/api/library/${songId}/separate`, { method: 'POST' }),
   play: () => request<AppState>('/api/playback/play', { method: 'POST' }),
   pause: () => request<AppState>('/api/playback/pause', { method: 'POST' }),
   seek: (positionSeconds: number) => request<AppState>('/api/playback/seek', {
@@ -67,7 +113,7 @@ const commands = {
 };
 
 class StemPlayer {
-  private projectId: string | null = null;
+  private songId: string | null = null;
   private elements = new Map<StemId, HTMLAudioElement>();
   private loopTimer: number | null = null;
 
@@ -75,13 +121,13 @@ class StemPlayer {
     const project = state.project;
     if (!project) {
       this.stopAll();
-      this.projectId = null;
+      this.songId = null;
       return;
     }
 
-    if (project.id !== this.projectId) {
+    if (project.songId !== this.songId) {
       this.stopAll();
-      this.projectId = project.id;
+      this.songId = project.songId;
     }
 
     const liveIds = new Set(project.stems.map(stem => stem.id));
@@ -109,7 +155,7 @@ class StemPlayer {
       audio.playbackRate = state.playback.speed;
 
       if (Math.abs(audio.currentTime - state.playback.positionSeconds) > 0.25) {
-        try { audio.currentTime = state.playback.positionSeconds; } catch { /* media metadata may still load */ }
+        try { audio.currentTime = state.playback.positionSeconds; } catch { /* metadata may still be loading */ }
       }
 
       if (state.playback.playing && audio.paused) {
@@ -155,16 +201,27 @@ const formatTime = (seconds: number) => {
 
 function App() {
   const [state, setState] = useState<AppState | null>(null);
+  const [sources, setSources] = useState<SourceDescriptor[]>([]);
+  const [sourceId, setSourceId] = useState('spotdl');
+  const [sourceRef, setSourceRef] = useState('');
+  const [file, setFile] = useState<File | null>(null);
+  const [autoSeparate, setAutoSeparate] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const player = useMemo(() => new StemPlayer(), []);
 
   useEffect(() => {
-    void commands.state().then(initial => {
-      setState(initial);
-      player.sync(initial);
-    }).catch(e => setError(String(e)));
+    void Promise.all([commands.state(), commands.sources()])
+      .then(([initial, availableSources]) => {
+        setState(initial);
+        setSources(availableSources);
+        if (!availableSources.some(source => source.id === sourceId) && availableSources[0]) {
+          setSourceId(availableSources[0].id);
+        }
+        player.sync(initial);
+      })
+      .catch(e => setError(String(e)));
 
-    const socket = new WebSocket('ws://127.0.0.1:4317/events');
+    const socket = new WebSocket(WS);
     socket.onmessage = event => {
       const message = JSON.parse(event.data);
       if (message.type === 'state') {
@@ -172,7 +229,6 @@ function App() {
         player.sync(message.state);
       }
     };
-
     return () => socket.close();
   }, [player]);
 
@@ -187,35 +243,131 @@ function App() {
 
   if (!state) return <main className="shell"><p>Connecting to Trackback API…</p></main>;
 
+  const source = sources.find(candidate => candidate.id === sourceId);
   const project = state.project;
   const playback = state.playback;
+
+  const startImport = async () => {
+    if (source?.inputKind === 'file') {
+      if (!file) throw new Error('Choose an audio file first');
+      await commands.upload(file, autoSeparate);
+      setFile(null);
+      return;
+    }
+    if (!sourceRef.trim()) throw new Error('Enter a song, Spotify URL, or audio URL');
+    await commands.importRef(sourceId, sourceRef.trim(), autoSeparate);
+    setSourceRef('');
+  };
 
   return (
     <main className="shell">
       <header className="topbar">
         <div>
           <h1>Trackback</h1>
-          <p className="subtitle">API-first rehearsal player</p>
+          <p className="subtitle">Rehearsal backing tracks, controlled through one local API</p>
         </div>
-        <div className="actions">
-          <button onClick={() => void run(commands.openDialog)}>Open audio</button>
-          <button disabled={!project || state.separation.running} onClick={() => void run(commands.separate)}>
-            {state.separation.running ? 'Splitting…' : 'Split stems'}
-          </button>
-        </div>
+        <span className="api-badge">API :4317</span>
       </header>
 
       {error && <div className="error">{error}</div>}
-      {state.separation.error && <div className="error">{state.separation.error}</div>}
 
-      {!project ? (
-        <section className="empty">
-          <h2>Open a song</h2>
-          <p>Play the original immediately, then split it into six stems.</p>
+      <section className="card import-card">
+        <div className="section-title">
+          <div>
+            <h2>Import song</h2>
+            <p>Choose where Trackback should get the source audio.</p>
+          </div>
+        </div>
+
+        <div className="import-grid">
+          <select value={sourceId} onChange={event => setSourceId(event.target.value)}>
+            {sources.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}
+          </select>
+
+          {source?.inputKind === 'file' ? (
+            <input
+              type="file"
+              accept=".wav,.flac,.mp3,.m4a,.ogg,.opus,.aiff,.aif,audio/*"
+              onChange={event => setFile(event.target.files?.[0] ?? null)}
+            />
+          ) : (
+            <input
+              type="text"
+              value={sourceRef}
+              placeholder={source?.placeholder ?? 'Source'}
+              onChange={event => setSourceRef(event.target.value)}
+              onKeyDown={event => {
+                if (event.key === 'Enter') void run(startImport);
+              }}
+            />
+          )}
+
+          <button onClick={() => void run(startImport)}>Import</button>
+        </div>
+
+        <div className="import-options">
+          <label>
+            <input
+              type="checkbox"
+              checked={autoSeparate}
+              onChange={event => setAutoSeparate(event.target.checked)}
+            />
+            Split stems after import
+          </label>
+          <span>{source?.description}</span>
+        </div>
+      </section>
+
+      {state.library.jobs.some(job => job.status !== 'ready') && (
+        <section className="card">
+          <h2>Import jobs</h2>
+          <div className="jobs">
+            {state.library.jobs.slice(0, 5).map(job => (
+              <div className="job" key={job.id}>
+                <strong>{job.sourceRef}</strong>
+                <span>{job.status}</span>
+                <small className={job.error ? 'job-error' : ''}>{job.error ?? job.message ?? ''}</small>
+              </div>
+            ))}
+          </div>
         </section>
-      ) : (
+      )}
+
+      <section className="card">
+        <div className="section-title">
+          <div>
+            <h2>Library</h2>
+            <p>{state.library.songs.length} song{state.library.songs.length === 1 ? '' : 's'}</p>
+          </div>
+        </div>
+
+        {state.library.songs.length === 0 ? (
+          <div className="empty-library">Import a song to create the local Trackback library.</div>
+        ) : (
+          <div className="library">
+            {state.library.songs.map(song => (
+              <div className="library-row" key={song.id}>
+                <div>
+                  <strong>{song.title}</strong>
+                  <span>{song.artist ?? song.album ?? song.sourceRepositoryId}</span>
+                </div>
+                <span className={`status status-${song.status}`}>{song.status}</span>
+                <span>{formatTime(song.durationSeconds)}</span>
+                <button onClick={() => void run(() => commands.openSong(song.id))}>
+                  {project?.songId === song.id ? 'Loaded' : 'Open'}
+                </button>
+                {song.stems.length === 0 && song.status !== 'separating' && (
+                  <button onClick={() => void run(() => commands.separateSong(song.id))}>Split</button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      {project && (
         <>
-          <section className="song">
+          <section className="card song">
             <div>
               <h2>{project.title}</h2>
               <span>{formatTime(playback.positionSeconds)} / {formatTime(project.durationSeconds)}</span>
@@ -285,11 +437,6 @@ function App() {
               </div>
             ))}
           </section>
-
-          <footer className="status">
-            <span>API: 127.0.0.1:4317</span>
-            <span>{state.separation.lastLogLine ?? 'Ready'}</span>
-          </footer>
         </>
       )}
     </main>

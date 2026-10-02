@@ -1,109 +1,208 @@
 # Trackback
 
-Trackback is a Linux desktop rehearsal player. It opens a song, separates it into stems, and lets you practice with selected instruments muted or reduced, at a slower speed, with A/B looping.
+Trackback is a local rehearsal backing-track player. Import a song, split it into stems, mute or reduce instruments, slow it down, and loop the part you want to practice.
 
-The first MVP is deliberately **not a DAW**.
+It is deliberately **not a DAW**.
 
-## API-first architecture
+## Architecture
+
+Trackback is a normal browser application backed by one localhost service:
 
 ```text
-React renderer
-      |
-      | HTTP commands + WebSocket state
-      v
-localhost API :4317
-      |
-      +-- authoritative project/playback/mixer state
-      +-- Electron file-dialog adapter
-      +-- audio-separator process adapter
-      |
-      v
-Renderer playback executor
+Browser (React/Vite)
+       |
+       | HTTP commands + WebSocket state
+       v
+Trackback API :4317
+       |
+       +-- library and import jobs
+       +-- source repositories
+       |     +-- local file
+       |     +-- direct HTTP(S) audio
+       |     +-- spotDL (Spotify URL or artist/title query)
+       |
+       +-- audio-separator
+       +-- authoritative playback/mixer state
+       |
+       v
+Browser audio playback
 ```
 
-Every user-visible command goes through the localhost API. The React UI does not call the playback or separation implementation directly. Future agents can therefore use the same API as the UI.
+There is no Electron layer. Every command that exists in the UI goes through the same localhost API that future agents will use.
 
-The current renderer executes audio with Chromium media elements. Chromium preserves pitch when playback speed changes. This is an MVP transport implementation behind the API contract and can later be replaced by AudioWorklet/SoundTouch or a native engine.
+## Development
 
-## MVP
+Requirements:
 
-- Open WAV, FLAC, MP3, M4A, OGG, OPUS or AIFF.
-- Play, pause and seek.
-- Playback speed from 50% to 120% with pitch preservation.
-- A/B loop.
-- Six-stem separation: vocals, drums, bass, guitar, piano and other.
-- Volume, mute and solo per stem.
-- Persistent local state.
-- REST command API and WebSocket state feed.
-
-## Requirements
-
-- Linux
 - Node.js 24+
 - npm
-- Python environment with `audio-separator`
-- FFmpeg as required by the separator stack
+- FFmpeg
+- Python environment for optional song import/separation tools
 
-For NVIDIA/CUDA:
-
-```bash
-pip install "audio-separator[gpu]"
-audio-separator --env_info
-```
-
-Trackback invokes `audio-separator` from `PATH`. To select another executable:
-
-```bash
-export TRACKBACK_AUDIO_SEPARATOR=/path/to/audio-separator
-```
-
-The MVP uses the Demucs six-stem model `htdemucs_6s.yaml`.
-
-## Run
+Install JavaScript dependencies:
 
 ```bash
 npm install
+```
+
+For a CPU-only development machine:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install "audio-separator[cpu]" spotdl
+audio-separator --env_info
+spotdl --version
+```
+
+GPU is not required. The default six-stem model is `htdemucs_6s.yaml`. On CPU it will be slower, but the rest of Trackback works normally while separation runs as a background job.
+
+To force the separator process to hide any CUDA devices:
+
+```bash
+export TRACKBACK_SEPARATOR_DEVICE=cpu
+```
+
+Optional executable/model overrides:
+
+```bash
+export TRACKBACK_AUDIO_SEPARATOR=/path/to/audio-separator
+export TRACKBACK_SPOTDL=/path/to/spotdl
+export TRACKBACK_SEPARATOR_MODEL=htdemucs_6s.yaml
+```
+
+Start development mode:
+
+```bash
 npm run dev
 ```
 
-## API
+Open:
 
-The API binds only to `127.0.0.1:4317`.
-
-### State
-
-```http
-GET /api/health
-GET /api/state
-WS  /events
+```text
+http://127.0.0.1:5173
 ```
 
-### Open audio
+The API runs on:
 
-The desktop UI calls:
-
-```http
-POST /api/dialog/open-audio
+```text
+http://127.0.0.1:4317
 ```
 
-Agents normally call:
+Build the web UI and run everything from the API server:
+
+```bash
+npm run build
+npm start
+```
+
+Then open `http://127.0.0.1:4317`.
+
+By default Trackback stores its library under:
+
+```text
+~/.local/share/trackback
+```
+
+Override it with `TRACKBACK_DATA_DIR`.
+
+## Source repositories
+
+Import is intentionally provider-independent. The first repositories are:
+
+### Local file
+
+Browser:
 
 ```http
-POST /api/project/open
+POST /api/import/upload?autoSeparate=true
+X-Filename: encoded-file-name.flac
+
+<raw file bytes>
+```
+
+Agent/local API:
+
+```http
+POST /api/import/path
 Content-Type: application/json
 
-{ "path": "/music/song.flac" }
+{
+  "path": "/music/song.flac",
+  "autoSeparate": true
+}
 ```
 
-### Stem separation
+### Direct HTTP(S) audio
 
 ```http
-POST /api/separation/start
+POST /api/import
+Content-Type: application/json
+
+{
+  "sourceRepositoryId": "http",
+  "sourceRef": "https://example.org/song.flac",
+  "autoSeparate": true
+}
 ```
 
-The call returns HTTP 202. Read progress and completion from `GET /api/state` or `WS /events`.
+### spotDL
 
-### Transport
+The spotDL repository accepts either a Spotify track URL or a text query:
+
+```http
+POST /api/import
+Content-Type: application/json
+
+{
+  "sourceRepositoryId": "spotdl",
+  "sourceRef": "Ramones - KKK Took My Baby Away",
+  "autoSeparate": true
+}
+```
+
+or:
+
+```json
+{
+  "sourceRepositoryId": "spotdl",
+  "sourceRef": "https://open.spotify.com/track/...",
+  "autoSeparate": true
+}
+```
+
+spotDL identifies the track from Spotify metadata and resolves downloadable audio from its supported sources. The imported file is cached in the Trackback library before stem separation.
+
+The first implementation intentionally accepts one track per import job.
+
+List available repositories:
+
+```http
+GET /api/sources
+```
+
+## Library and jobs
+
+```http
+GET /api/state
+GET /api/library
+WS  /events
+
+POST /api/library/:songId/open
+POST /api/library/:songId/separate
+```
+
+Import jobs move through:
+
+```text
+queued -> importing -> separating -> ready
+                           |
+                           -> error
+```
+
+Set `autoSeparate: false` to test import and playback without waiting for CPU stem separation.
+
+## Playback API
 
 ```http
 POST /api/playback/play
@@ -122,16 +221,7 @@ POST /api/playback/loop
 { "startSeconds": null, "endSeconds": null }
 ```
 
-The state and API already reserve independent pitch control:
-
-```http
-POST /api/playback/pitch
-{ "semitones": -2 }
-```
-
-The MVP browser transport does not yet apply independent pitch shifting. The endpoint is present so the external API does not need to change when DSP is added.
-
-### Mixer
+Mixer:
 
 ```http
 PATCH /api/stems/bass
@@ -147,16 +237,17 @@ PATCH /api/stems/drums
 { "solo": true }
 ```
 
-This is intentionally close to future agent commands such as:
+Independent pitch is reserved in the API but is not applied by the current browser transport yet:
 
-> Play the intro at 80%. Remove bass and turn the guitar down.
-
-The semantic layer later only needs to resolve `intro` to a region and translate the request to API calls.
+```http
+POST /api/playback/pitch
+{ "semitones": -2 }
+```
 
 ## Next slices
 
-1. Waveform and named song sections.
-2. Beat/BPM detection and count-in.
-3. Independent pitch shift through AudioWorklet.
-4. OpenAPI schema and generated client.
-5. Semantic agent command layer above the low-level API.
+1. Search/result selection instead of one-shot spotDL text resolution.
+2. Waveform and named song sections.
+3. BPM/beat detection and count-in.
+4. Better time-stretch/pitch through AudioWorklet.
+5. OpenAPI schema and semantic agent layer.
