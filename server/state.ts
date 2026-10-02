@@ -96,7 +96,17 @@ export class StateStore extends EventEmitter {
         ...parsed,
         library: {
           songs: parsed.library?.songs ?? [],
-          jobs: parsed.library?.jobs ?? []
+          jobs: (parsed.library?.jobs ?? []).map(job => {
+            if (job.status === 'queued' || job.status === 'importing' || job.status === 'separating') {
+              return {
+                ...job,
+                status: 'error' as const,
+                message: null,
+                error: 'Interrupted by Trackback restart'
+              };
+            }
+            return job;
+          })
         },
         playback: {
           ...base.playback,
